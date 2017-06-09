@@ -2119,68 +2119,139 @@
   };
   d3.csv = d3.dsv(",", "text/csv");
   d3.tsv = d3.dsv("	", "text/tab-separated-values");
-  var d3_timer_queueHead, d3_timer_queueTail, d3_timer_interval, d3_timer_timeout, d3_timer_frame = this[d3_vendorSymbol(this, "requestAnimationFrame")] || function(callback) {
-    setTimeout(callback, 17);
-  };
-  d3.timer = function() {
-    d3_timer.apply(this, arguments);
-  };
-  function d3_timer(callback, delay, then) {
-    var n = arguments.length;
-    if (n < 2) delay = 0;
-    if (n < 3) then = Date.now();
-    var time = then + delay, timer = {
-      c: callback,
-      t: time,
-      n: null
+  (function(exports) {
+    "use strict";
+    var frame = 0;
+    var timeout = 0;
+    var interval = 0;
+    var pokeDelay = 1e3;
+    var taskHead;
+    var taskTail;
+    var clockLast = 0;
+    var clockNow = 0;
+    var clockSkew = 0;
+    var clock = typeof performance === "object" && performance.now ? performance : Date;
+    var setFrame = typeof window === "object" && window.requestAnimationFrame ? window.requestAnimationFrame.bind(window) : function(f) {
+      setTimeout(f, 17);
     };
-    if (d3_timer_queueTail) d3_timer_queueTail.n = timer; else d3_timer_queueHead = timer;
-    d3_timer_queueTail = timer;
-    if (!d3_timer_interval) {
-      d3_timer_timeout = clearTimeout(d3_timer_timeout);
-      d3_timer_interval = 1;
-      d3_timer_frame(d3_timer_step);
+    function now() {
+      return clockNow || (setFrame(clearNow), clockNow = clock.now() + clockSkew);
     }
-    return timer;
-  }
-  function d3_timer_step() {
-    var now = d3_timer_mark(), delay = d3_timer_sweep() - now;
-    if (delay > 24) {
-      if (isFinite(delay)) {
-        clearTimeout(d3_timer_timeout);
-        d3_timer_timeout = setTimeout(d3_timer_step, delay);
+    function clearNow() {
+      clockNow = 0;
+    }
+    function Timer() {
+      this._call = this._time = this._next = null;
+    }
+    Timer.prototype = timer.prototype = {
+      constructor: Timer,
+      restart: function(callback, delay, time) {
+        if (typeof callback !== "function") throw new TypeError("callback is not a function");
+        time = (time == null ? now() : +time) + (delay == null ? 0 : +delay);
+        if (!this._next && taskTail !== this) {
+          if (taskTail) taskTail._next = this; else taskHead = this;
+          taskTail = this;
+        }
+        this._call = callback;
+        this._time = time;
+        sleep();
+      },
+      stop: function() {
+        if (this._call) {
+          this._call = null;
+          this._time = Infinity;
+          sleep();
+        }
+      },
+      flush: function() {
+        timerFlush();
       }
-      d3_timer_interval = 0;
-    } else {
-      d3_timer_interval = 1;
-      d3_timer_frame(d3_timer_step);
+    };
+    function timer(callback, delay, time) {
+      var t = new Timer();
+      t.restart(callback, delay, time);
+      return t;
     }
-  }
-  d3.timer.flush = function() {
-    d3_timer_mark();
-    d3_timer_sweep();
-  };
-  function d3_timer_mark() {
-    var now = Date.now(), timer = d3_timer_queueHead;
-    while (timer) {
-      if (now >= timer.t && timer.c(now - timer.t)) timer.c = null;
-      timer = timer.n;
+    function timerFlush() {
+      now();
+      ++frame;
+      var t = taskHead, e;
+      while (t) {
+        if ((e = clockNow - t._time) >= 0) t._call.call(null, e);
+        t = t._next;
+      }
+      --frame;
     }
-    return now;
-  }
-  function d3_timer_sweep() {
-    var t0, t1 = d3_timer_queueHead, time = Infinity;
-    while (t1) {
-      if (t1.c) {
-        if (t1.t < time) time = t1.t;
-        t1 = (t0 = t1).n;
+    function wake() {
+      clockNow = (clockLast = clock.now()) + clockSkew;
+      frame = timeout = 0;
+      try {
+        timerFlush();
+      } finally {
+        frame = 0;
+        nap();
+        clockNow = 0;
+      }
+    }
+    function poke() {
+      var now = clock.now(), delay = now - clockLast;
+      if (delay > pokeDelay) clockSkew -= delay, clockLast = now;
+    }
+    function nap() {
+      var t0, t1 = taskHead, t2, time = Infinity;
+      while (t1) {
+        if (t1._call) {
+          if (time > t1._time) time = t1._time;
+          t0 = t1, t1 = t1._next;
+        } else {
+          t2 = t1._next, t1._next = null;
+          t1 = t0 ? t0._next = t2 : taskHead = t2;
+        }
+      }
+      taskTail = t0;
+      sleep(time);
+    }
+    function sleep(time) {
+      if (frame) return;
+      if (timeout) timeout = clearTimeout(timeout);
+      var delay = time - clockNow;
+      if (delay > 24) {
+        if (time < Infinity) timeout = setTimeout(wake, delay);
+        if (interval) interval = clearInterval(interval);
       } else {
-        t1 = t0 ? t0.n = t1.n : d3_timer_queueHead = t1.n;
+        if (!interval) clockLast = clockNow, interval = setInterval(poke, pokeDelay);
+        frame = 1, setFrame(wake);
       }
     }
-    d3_timer_queueTail = t0;
-    return time;
-  }
+    var timeout$1 = function(callback, delay, time) {
+      var t = new Timer();
+      delay = delay == null ? 0 : +delay;
+      t.restart(function(elapsed) {
+        t.stop();
+        callback(elapsed + delay);
+      }, delay, time);
+      return t;
+    };
+    var interval$1 = function(callback, delay, time) {
+      var t = new Timer(), total = delay;
+      if (delay == null) return t.restart(callback, delay, time), t;
+      delay = +delay, time = time == null ? now() : +time;
+      t.restart(function tick(elapsed) {
+        elapsed += total;
+        t.restart(tick, total += delay, time);
+        callback(elapsed);
+      }, delay, time);
+      return t;
+    };
+    exports.now = now;
+    exports.timer = timer;
+    exports.timerFlush = timerFlush;
+    exports.timeout = timeout$1;
+    exports.interval = interval$1;
+  })(d3);
+  var d3_timer = d3.timer;
+  var d3_timeout = d3.timeout;
+  var d3_now = d3.now;
   function d3_format_precision(x, p) {
     return p - (x ? Math.ceil(Math.log(x) / Math.LN10) : 1);
   }
@@ -6367,7 +6438,7 @@
         if (x > 0) {
           alpha = x;
         } else {
-          timer.c = null, timer.t = NaN, timer = null;
+          timer.stop(), timer = null;
           event.end({
             type: "end",
             alpha: alpha = 0
@@ -8627,7 +8698,7 @@
   var d3_svg_symbolSqrt3 = Math.sqrt(3), d3_svg_symbolTan30 = Math.tan(30 * d3_radians);
   d3_selectionPrototype.transition = function(name) {
     var id = d3_transitionInheritId || ++d3_transitionId, ns = d3_transitionNamespace(name), subgroups = [], subgroup, node, transition = d3_transitionInherit || {
-      time: Date.now(),
+      time: d3_now(),
       ease: d3_ease_cubicInOut,
       delay: 0,
       duration: 250
@@ -8909,15 +8980,14 @@
     }), transition = lock[id], time, timer, duration, ease, tweens;
     function schedule(elapsed) {
       var delay = transition.delay;
-      timer.t = delay + time;
+      timer.restart(start, delay, time);
       if (delay <= elapsed) return start(elapsed - delay);
-      timer.c = start;
     }
     function start(elapsed) {
       var activeId = lock.active, active = lock[activeId];
       if (active) {
-        active.timer.c = null;
-        active.timer.t = NaN;
+        active.timer.stop();
+        active.timer = null;
         --lock.count;
         delete lock[activeId];
         active.event && active.event.interrupt.call(node, node.__data__, active.index);
@@ -8925,20 +8995,16 @@
       for (var cancelId in lock) {
         if (+cancelId < id) {
           var cancel = lock[cancelId];
-          cancel.timer.c = null;
-          cancel.timer.t = NaN;
+          cancel.timer.stop();
+          cancel.timer = null;
           --lock.count;
           delete lock[cancelId];
         }
       }
-      timer.c = tick;
-      d3_timer(function() {
-        if (timer.c && tick(elapsed || 1)) {
-          timer.c = null;
-          timer.t = NaN;
-        }
-        return 1;
-      }, 0, time);
+      d3_timeout(function() {
+        timer.restart(tick, transition.delay, time);
+        tick(elapsed);
+      });
       lock.active = id;
       transition.event && transition.event.start.call(node, node.__data__, i);
       tweens = [];
@@ -8958,7 +9024,7 @@
       if (t >= 1) {
         transition.event && transition.event.end.call(node, node.__data__, i);
         if (--lock.count) delete lock[id]; else delete node[ns];
-        return 1;
+        timer.stop();
       }
     }
     if (!transition) {

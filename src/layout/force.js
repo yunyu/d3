@@ -201,7 +201,7 @@ d3.layout.force = function() {
       if (x > 0) { // we might keep it hot
         alpha = x;
       } else { // or we might stop
-        timer.c = null, timer.t = NaN, timer = null;
+        timer.stop(), timer = null;
         event.end({type: "end", alpha: alpha = 0});
       }
     } else if (x > 0) { // otherwise, fire it up!
